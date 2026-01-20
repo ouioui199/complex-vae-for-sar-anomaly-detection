@@ -1,33 +1,28 @@
 from typing import Dict
-from types import NoneType
 from argparse import ArgumentParser
 from overrides import override
+import os, glob
 
 import torch
 import numpy as np
 from torch import Tensor
 
-from datasets.base_dataset import ReconstructorFile, DespecklerFile, ReconstructorDataset, DespecklerDataset
-from datasets.utils import symetrisation_patch
+from datasets.base_dataset import ReconstructorFile, ReconstructorDataset, BaseDataset
 
 
 class ReconstructorTrainFile(ReconstructorFile):
+    
     def __init__(
         self, 
         opt: ArgumentParser,
         filepath: str,
-        filepath_rx: str | NoneType,
         phase: str = 'train',
     ) -> None:
-        super().__init__(opt, filepath, filepath_rx, phase)
+        super().__init__(opt, filepath, phase)
 
         _, nrows, ncols = self.data.shape
         self.nsamples_per_rows = (ncols - opt.recon_patch_size) // opt.recon_stride + 1
         self.nsamples_per_cols = (nrows - opt.recon_patch_size) // opt.recon_stride + 1
-    
-    @override
-    def __len__(self) -> int:
-        return self.nsamples_per_rows * self.nsamples_per_cols
     
     @override
     def __getitem__(self, index: int) -> Dict[str, np.memmap | str | int]:
@@ -39,13 +34,11 @@ class ReconstructorTrainFile(ReconstructorFile):
 
         output = {
             'data': self.data[:, row_start : row_start + self.opt.recon_patch_size, col_start : col_start + self.opt.recon_patch_size],
-            'filepath': self.filepath,
-            'min': self.min_val,
-            'max': self.max_val
+            'filepath': self.filepath
         }
         
-        if self.opt.recon_conditional:
-            output['RX_map'] = self.rx_map[:, row_start : row_start + self.opt.recon_patch_size, col_start : col_start + self.opt.recon_patch_size]
+        if self.opt.recon_classification_guided:
+            output['label'] = self.data_rx[row_start : row_start + self.opt.recon_patch_size, col_start : col_start + self.opt.recon_patch_size]
 
         if self.opt.recon_visualize:
             output['row'] = row
@@ -60,237 +53,77 @@ class ReconstructorValidFile(ReconstructorFile):
         self, 
         opt: ArgumentParser, 
         filepath: str,
-        filepath_rx: str | NoneType,
         phase: str = 'valid',
     ) -> None:
-        super().__init__(opt, filepath, filepath_rx, phase)
+        super().__init__(opt, filepath, phase)
 
-    @override
-    def __len__(self) -> int:
-        return 1
+        _, h, w = self.data.shape
+        if phase == 'valid':
+            stride = self.opt.recon_stride // 4
+        elif self.opt.recon_data_prediction == 'synthetic_only':
+            stride = 1
+        if h == self.opt.recon_patch_size:
+            self.x_range = list(np.array([0]))
+        else:
+            self.x_range = list(range(0, h - self.opt.recon_patch_size, stride))
+            if (self.x_range[-1] + self.opt.recon_patch_size) < h :
+                self.x_range.extend(range(h - self.opt.recon_patch_size, h - self.opt.recon_patch_size + 1))
+        
+        if w == self.opt.recon_patch_size:
+            self.y_range = list(np.array([0]))
+        else:
+            self.y_range = list(range(0, w - self.opt.recon_patch_size, stride))
+            if (self.y_range[-1] + self.opt.recon_patch_size) < w:
+                self.y_range.extend(range(w - self.opt.recon_patch_size, w - self.opt.recon_patch_size + 1))
+
+        self.nsamples_per_rows = len(self.y_range)
+        self.nsamples_per_cols = len(self.x_range)
     
     @override
     def __getitem__(self, index: int) -> Dict[str, np.memmap | str]:
+        row = index % self.nsamples_per_rows
+        col = index // self.nsamples_per_rows
+
+        row_start = self.y_range[row]
+        col_start = self.x_range[col]
+
         output = {
-            'data': self.data,
+            'data': self.data[:, col_start : col_start + self.opt.recon_patch_size, row_start : row_start + self.opt.recon_patch_size],
             'filepath': self.filepath,
-            'min': self.min_val,
-            'max': self.max_val
+            'row': row_start,
+            'col': col_start
         }
 
         return output
     
 
-class ReconstructorTrainDataset(ReconstructorDataset):
-
-    def __init__(
-            self, 
-            opt: ArgumentParser,
-            phase: str = 'train'
-    ) -> None:
-        super().__init__(opt, phase)
-            
-        self.filepath = next((s for s in self.filepath if 'crop' not in s), None)
-        self.filepath_rx = next((s for s in self.filepath_rx if 'crop' not in s), None)
-
-        self.dataset = ReconstructorTrainFile(opt, self.filepath, self.filepath_rx, phase)
-        self.normalize = self.get_normalization(self.dataset)
-
-    @override
-    def __len__(self) -> int:
-        return len(self.dataset)
-
-    @override
-    def __getitem__(self, index: int) -> Dict[str, Tensor | str | int]:
-        image = self.normalize(self.dataset[index]['data'])
-        
-        output = {
-            'image': self.to_tensor(image),
-            'filepath': self.dataset[index]['filepath'],
-            'min': self.to_tensor(self.dataset.min_val),
-            'max': self.to_tensor(self.dataset.max_val)
-        }
-
-        if self.opt.recon_conditional:
-            output['RX_map'] = self.to_tensor(self.dataset[index]['RX_map'])
-
-        if self.opt.recon_visualize:
-            output['row'] = str(self.dataset[index]['row'])
-            output['col'] = str(self.dataset[index]['col'])
-
-        return output
-    
-
-class ReconstructorValidDataset(ReconstructorDataset):
-
-    def __init__(
-        self, 
-        opt: ArgumentParser,
-        phase: str = 'valid'
-    ) -> None:
-        super().__init__(opt, phase)
-        filepath = next((s for s in self.filepath if ('crop' not in s)), None)
-        filepath_rx = next((s for s in self.filepath_rx if ('crop' not in s)), None)
-        self.dataset = ReconstructorValidFile(opt, filepath, filepath_rx, phase)
-        self.normalize = self.get_normalization(self.dataset)
-
-    @override
-    def __len__(self) -> int:
-        return len(self.dataset)
-    
-    @override
-    def __getitem__(self, index: int) -> Dict[str, Tensor | str | int]:
-        filepath = self.dataset[index]['filepath']
-        image = self.dataset[index]['data']
-        image = self.normalize(image)
-        output = {
-            'image': self.to_tensor(image),
-            'filepath': filepath,
-            'min': self.to_tensor(self.dataset.min_val),
-            'max': self.to_tensor(self.dataset.max_val)
-        }
-
-        return output
-    
-
-class ReconstructorPredictDataset(ReconstructorDataset):
-    
-    def __init__(
-        self, 
-        opt: ArgumentParser,
-        phase: str = 'predict'
-    ) -> None:
-        super().__init__(opt, phase)
-        
-        filepath = self.filepath
-        if self.opt.recon_sample_prediction:
-            filepath = [s for s in self.filepath if 'crop' in s]
-        
-        self.dataset = [ReconstructorValidFile(opt, fp, None, phase) for fp in filepath]
-    
-    @override
-    def __len__(self) -> int:
-        return len(self.dataset)
-
-    @override
-    def __getitem__(self, index: int) -> Dict[str, Tensor | str | int]:
-        dataset = self.dataset[index]
-        normalize = self.get_normalization(dataset)
-        image = normalize(dataset[0]['data'])
-        
-        output = {
-            'image': self.to_tensor(image),
-            'filepath': dataset[0]['filepath'],
-            'min': self.to_tensor(dataset.min_val),
-            'max': self.to_tensor(dataset.max_val)
-        }
-
-        return output
-
-
-class DespecklerTrainFile(DespecklerFile):
-
-    def __init__(
-        self, 
-        opt: ArgumentParser,
-        filepath: str, 
-        phase: str = 'train'
-    ) -> None:
-        """Return one of its patches from the data memory map for training."""
-        super().__init__(opt, filepath, phase)
-
-        nrows, ncols = self.data.shape
-        self.nsamples_per_rows = (ncols - opt.despeckler_patch_size) // opt.despeckler_stride + 1
-        self.nsamples_per_cols = (nrows - opt.despeckler_patch_size) // opt.despeckler_stride + 1
-    
-    @override
-    def __len__(self) -> int:
-        """Returns the number of patches that can be extracted from the NPY file."""
-        return self.nsamples_per_rows * self.nsamples_per_cols
-    
-    @override
-    def __getitem__(self, index: int) -> Dict[str, np.memmap | str | int]:
-        """Returns the index-th patch from the NPY file.
-
-        Args:
-            item (int): index of the patch to be extracted.
-
-        Returns:
-            Dict[str, np.memmap | str | int]: Numpy memory map data and metadata
-        """
-        row = index // self.nsamples_per_rows
-        col = index % self.nsamples_per_rows
-
-        row_start = row * self.opt.despeckler_stride
-        col_start = col * self.opt.despeckler_stride
-
-        output = {
-            'data': self.data[row_start : row_start + self.opt.despeckler_patch_size, col_start : col_start + self.opt.despeckler_patch_size],
-            'filepath': self.filepath
-        }
-
-        if self.opt.despeckler_visualize:
-            output['row'] = row
-            output['col'] = col
-
-        return output
-
-
-class DespecklerValidFile(DespecklerFile):
+class ReconstructorTestFile:
 
     def __init__(
         self, 
         opt: ArgumentParser, 
-        filepath: str, 
-        phase: str = 'valid'
+        filepath_input: str,
+        filepath_reconstructed: str
     ) -> None:
         """Return the whole validation part of the image"""
-        super().__init__(opt, filepath, phase)
-
-    @override
-    def __len__(self) -> int:
-        """Returns 1 as NPYFile process individual image."""
-        return 1
-    
-    @override
-    def __getitem__(self, index: int) -> Dict[str, np.memmap | str | int]:
-        """Returns validation data from the NPY file.
-
-        Args:
-            item (int): index of the patch to be extracted.
-
-        Returns:
-            Dict[str, np.memmap | str | int]: Numpy memory map data and metadata
-        """
-        output = {
-            'data': self.data,
-            'filepath': self.filepath
-        }
-
-        return output
-
-
-class DespecklerTrainDataset(DespecklerDataset):
-
-    def __init__(
-            self, 
-            opt: ArgumentParser,
-            phase: str = 'train'
-    ) -> None:
-        """Form a training dataset."""
-        super().__init__(opt, phase)
+        self.opt = opt
         
-        if len(self.filepath) != 1:
-            raise RuntimeError(f"Only one image with 4 polarizations is allowed in the training dataset. Found {len(self.filepath)} files.")
-        self.dataset = DespecklerTrainFile(opt, self.filepath[0], phase)
-        self.normalize = self.normalize(self.dataset.data_min_max['min'], self.dataset.data_min_max['max'])
+        self.input = np.load(filepath_input, mmap_mode='r')
+        self.input = np.abs(self.input) if 'cplx' not in opt.recon_model else self.input
 
-    @override
+        self.reconstructed = np.load(filepath_reconstructed, mmap_mode='r')
+        self.reconstructed = np.abs(self.reconstructed) if 'cplx' not in opt.recon_model else self.reconstructed
+
+        _, self.height, self.width = self.input.shape
+        self.half_kernel = opt.recon_anomaly_kernel // 2
+        
+        self.height = self.height - self.half_kernel * 2
+        self.width = self.width - self.half_kernel * 2
+        
     def __len__(self) -> int:
         """Returns the total number of patches of the dataset."""
-        return len(self.dataset)
-
-    @override
+        return self.height * self.width
+    
     def __getitem__(self, index: int) -> Dict[str, Tensor | str | int]:
         """Returns the index-th patch of the associated NPY file.
 
@@ -300,59 +133,97 @@ class DespecklerTrainDataset(DespecklerDataset):
         Returns:
             Dict[str, Tensor | str | int]: Tensor and metadata
         """
-        real, imag = self.normalize(self.dataset[index]['data'].real), self.normalize(self.dataset[index]['data'].imag)
-        real, imag = symetrisation_patch(real, imag)
-        output = {
-            'real': self.to_tensor(real),
-            'imag': self.to_tensor(imag),
-            'filepath': self.dataset[index]['filepath'],
-            'min': self.dataset.data_min_max['min'].astype(np.float32),
-            'max': self.dataset.data_min_max['max'].astype(np.float32)
+        col_idx = index % self.height + self.half_kernel
+        row_idx = index // self.height + self.half_kernel
+        
+        up = col_idx - self.half_kernel
+        down = col_idx + self.half_kernel + 1
+        left = row_idx - self.half_kernel
+        right = row_idx + self.half_kernel + 1
+        
+        input_patch = self.input[:, up:down, left:right]
+        reconstructed_patch = self.reconstructed[:, up:down, left:right]
+        
+        return {
+            'input': input_patch,
+            'reconstructed': reconstructed_patch,
+            'col': col_idx - self.half_kernel,
+            'row': row_idx - self.half_kernel
         }
 
-        if self.opt.despeckler_visualize:
-            output['row'] = str(self.dataset[index]['row'])
-            output['col'] = str(self.dataset[index]['col'])
+
+class ReconstructorTrainDataset(ReconstructorDataset):
+
+    def __init__(
+            self, 
+            opt: ArgumentParser,
+            phase: str = 'train'
+    ) -> None:
+        super().__init__(opt, phase)
+        self.filepath = [fp for fp in self.filepath if ('anomaly' not in fp) and ('synthetic' not in fp) and ('crop' not in fp)]
+        self.dataset = [ReconstructorTrainFile(opt, filepath, phase) for filepath in self.filepath]
+        self.get_normalization()
+
+    @override
+    def __getitem__(self, index: int) -> Dict[str, Tensor | str | int]:
+        for image in self.dataset:
+            if index < len(image):
+                break
+            index -= len(image)
+        
+        output = {
+            'image': self.to_tensor(self.normalize(image[index]['data'])),
+            'filepath': image[index]['filepath'],
+            'min': torch.from_numpy(self.dataset_min),
+            'max': torch.from_numpy(self.dataset_max)
+        }
+        
+        if self.opt.recon_classification_guided:
+            output['label'] = torch.from_numpy(image[index]['label']).unsqueeze(0).to(torch.float32)
+
+        if self.opt.recon_visualize:
+            output['row'] = str(image[index]['row'])
+            output['col'] = str(image[index]['col'])
 
         return output
-    
+ 
 
-class DespecklerValidDataset(DespecklerDataset):
+class ReconstructorValidDataset(ReconstructorDataset):
 
     def __init__(
         self, 
-        opt: ArgumentParser, 
+        opt: ArgumentParser,
         phase: str = 'valid'
     ) -> None:
-        """Form a validation dataset."""
         super().__init__(opt, phase)
-
-        if len(self.filepath) != 1:
-            raise RuntimeError(f"Only one image with 4 polarizations is allowed in the validation dataset. Found {len(self.filepath)} files.")
-        self.dataset = DespecklerValidFile(opt, self.filepath[0], phase)
-        self.dataset_min_max = self.dataset.data_min_max
         
-        self.normalize = self.normalize(self.dataset_min_max['min'], self.dataset_min_max['max'])
-
-    @override
-    def __len__(self) -> int:
-        return len(self.dataset)
+        if phase == 'valid':
+            self.dataset = [ReconstructorValidFile(opt, fp, phase) for fp in self.filepath if ('crop' not in fp) and ('synthetic' not in fp) and ('anomaly' not in fp)]
+            self.get_normalization()
     
     @override
     def __getitem__(self, index: int) -> Dict[str, Tensor | str | int]:
-        real, imag = self.normalize(self.dataset[index]['data'].real), self.normalize(self.dataset[index]['data'].imag)
+        image_id = 0
+        for image in self.dataset:
+            image_id += 1
+            if index < len(image):
+                break
+            index -= len(image)
+
+        image = image[index]
+        
         output = {
-            'real': torch.from_numpy(real.astype(np.float32)),
-            'imag': torch.from_numpy(imag.astype(np.float32)),
-            'filepath': self.dataset[index]['filepath'],
-            'min': self.dataset.data_min_max['min'].astype(np.float32),
-            'max': self.dataset.data_min_max['max'].astype(np.float32)
+            'image': self.to_tensor(self.normalize(image['data'])),
+            'filepath': image['filepath'],
+            'image_id': image_id,
+            'row': image['row'],
+            'col': image['col']
         }
 
         return output
 
 
-class DespecklerPredictDataset(DespecklerDataset):
+class ReconstructorPredictDataset(ReconstructorValidDataset):
     
     def __init__(
         self, 
@@ -361,29 +232,69 @@ class DespecklerPredictDataset(DespecklerDataset):
     ) -> None:
         super().__init__(opt, phase)
         
-        if len(self.filepath) != 1:
-            self.dataset = [DespecklerValidFile(opt, f, phase) for f in self.filepath]
-        else:
-            self.dataset = DespecklerValidFile(opt, self.filepath[0], phase)
-        
-        
-    @override
-    def __len__(self) -> int:
-        return len(self.dataset)
-    
-    @override
-    def __getitem__(self, index: int) -> Dict[str, Tensor | str | int]:
-        data = self.dataset[index]
-        image_phase = np.angle(data[0]['data'])
-        normalize = self.normalize(data.data_min_max['min'], data.data_min_max['max'])
-        real, imag = normalize(data[0]['data'].real), normalize(data[0]['data'].imag)
-        output = {
-            'real': torch.from_numpy(real.astype(np.float32)),
-            'imag': torch.from_numpy(imag.astype(np.float32)),
-            'filepath': data[0]['filepath'],
-            'min': data.data_min_max['min'].astype(np.float32),
-            'max': data.data_min_max['max'].astype(np.float32),
-            'image_phase': torch.from_numpy(image_phase)
+        filepath_dict = {
+            'full': self.filepath,
+            'sample_only': [s for s in self.filepath if 'crop' in s],
+            'valid_only': [s for s in self.filepath if ('crop' not in s) and ('synthetic' not in s) and ('clutter' not in s) and ('mask' not in s)],
+            'synthetic_only': [s for s in self.filepath if ('synthetic' in s) or ('clutter' in s)],
         }
+        for k, v in filepath_dict.items():
+            if self.opt.recon_data_prediction == k:
+                filepath = v
+                break
+        
+        dataset_filepaths = [fp for fp in filepath]
+        self.dataset = [
+            ReconstructorValidFile(opt, fp, phase) for fp in dataset_filepaths
+        ]
+        self.get_normalization()
 
-        return output
+        
+class ReconstructorTestDataset(BaseDataset):
+
+    def __init__(self, opt: ArgumentParser, phase: str = 'test'):
+        super().__init__(opt, phase)
+        
+        version_number = opt.version.split('AE')[1]
+        filepath_slc_all = set(glob.glob(os.path.join(self.data_dir, 'slc', '*.npy')))
+        self.filepath_reconstructed = glob.glob(os.path.join(self.data_dir, f'reconstructed{version_number}', '*.npy'))
+        # Find matching SLC files for each reconstructed file
+        self.filepath_input = [
+                fp.replace(f'reconstructed{version_number}/pred_', f'{self.data_folder}/') 
+                for fp in self.filepath_reconstructed 
+                if fp.replace(f'reconstructed{version_number}/pred_', 'slc/') in filepath_slc_all
+            ]
+        
+        self.images = [
+            ReconstructorTestFile(opt, filepath_slc, filepath_reconstructed) for (filepath_slc, filepath_reconstructed) in zip(self.filepath_input, self.filepath_reconstructed)
+        ]
+
+    def __len__(self) -> int:
+        """Returns the total number of patches of the dataset."""
+        return sum([len(image) for image in self.images])
+
+    def __getitem__(self, index: int) -> Dict[str, Tensor | str | int]:
+        """Returns the index-th patch of the associated NPY file.
+
+        Args:
+            index (int): index of the patch to be extracted
+
+        Returns:
+            Dict[str, Tensor | str | int]: Tensor and metadata
+        """
+        image_id = 0
+        for image in self.images:
+            image_id += 1
+            if index < len(image):
+                break
+            index -= len(image)
+
+        input, reconstructed = image[index]['input'], image[index]['reconstructed']
+        return {
+            'input': self.to_tensor(input),
+            'reconstructed': self.to_tensor(reconstructed),
+            'image_id': image_id,
+            'filepath': self.filepath_input[image_id - 1],
+            'row': image[index]['row'],
+            'col': image[index]['col']
+        }

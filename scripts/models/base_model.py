@@ -1,11 +1,12 @@
-from abc import ABC, abstractmethod
+from abc import ABC
 from argparse import Namespace
-from typing import Sequence, List, Any
+from typing import Sequence
 from pathlib import Path
 import os
 
 import torch
-from torch import nn, Tensor
+from torch import Tensor
+import numpy as np
 
 from lightning import LightningModule
 from torchvision.utils import make_grid
@@ -38,57 +39,17 @@ class BaseModel(LightningModule, ABC):
         )
         
     def compute_scm_smv(self, x: Tensor) -> Sequence[Tensor]: 
-        mu = x.mean(dim=0)
-        x_centered = (x - mu).T
-        (p, N) = x.shape
-        sigma = (x_centered @ x_centered.conj().T) / (N-1)
+        (_, _, N) = x.shape
+        
+        sigma = torch.bmm(x, x.conj().transpose(-2, -1)) / (N-1)
+        mu = None
+            
         return sigma, mu
     
-    def create_anomaly_map(self, pred: Tensor, input: Tensor) -> Tensor:
-        c, h, w = pred.shape
-        half_kernel = self.opt.recon_anomaly_kernel // 2
-        anomaly_map = torch.zeros(h, w)
-        for i in range(h):
-            for j in range(w):
-                up = max(0, i - half_kernel)
-                down = min(h, i + half_kernel + 1)
-                left = max(0, j - half_kernel)
-                right = min(w, j + half_kernel + 1)
-                
-                pred_patch = pred[:, up:down, left:right]
-                pred_patch = pred_patch.reshape(c, -1)
-                pred_patch_cov, pred_patch_mean = self.compute_scm_smv(pred_patch)
-                
-                input_patch = input[:, up:down, left:right]
-                input_patch = input_patch.reshape(c, -1)
-                input_patch_cov, input_patch_mean = self.compute_scm_smv(input_patch)
-                
-                anomaly_map[i, j] = torch.linalg.norm(pred_patch_cov - input_patch_cov, ord='fro') ** 2
-        
-        return anomaly_map
-
+    def create_manhattan_anomaly_map(self, pred: np.memmap, input: np.memmap) -> np.memmap:
+        difference = np.abs(pred - input)
+        return difference, difference.sum(axis=0)
     
-class BaseVAE(nn.Module):
-    
-    def __init__(self) -> None:
-        super(BaseVAE, self).__init__()
-
-    def encode(self, input: Tensor) -> List[Tensor]:
-        raise NotImplementedError
-
-    def decode(self, input: Tensor) -> Any:
-        raise NotImplementedError
-
-    def sample(self, batch_size:int, current_device: int, **kwargs) -> Tensor:
-        raise NotImplementedError
-
-    def generate(self, x: Tensor, **kwargs) -> Tensor:
-        raise NotImplementedError
-
-    @abstractmethod
-    def forward(self, *inputs: Tensor) -> Tensor:
-        pass
-
-    @abstractmethod
-    def loss_function(self, *inputs: Any, **kwargs) -> Tensor:
-        pass
+    def create_euclidean_anomaly_map(self, pred: np.memmap, input: np.memmap) -> np.memmap:
+        difference = (pred - input) ** 2
+        return np.sqrt(difference), np.sqrt(difference.sum(axis=0))

@@ -1,160 +1,31 @@
 from argparse import Namespace
-from typing import Sequence, List, Dict
+from typing import Sequence, Dict
 from pathlib import Path
+import os
 
 import torch
 import numpy as np
-from matplotlib import cm
-from matplotlib import pyplot as plt
 from torch import nn, Tensor
-from torch.nn import MSELoss, L1Loss, HuberLoss
+import torchcvnn.nn as c_nn
 from torch.optim import Adam
-from torch.optim.lr_scheduler import MultiStepLR, CyclicLR, ExponentialLR, ReduceLROnPlateau
-from torchcvnn.transforms.functional import equalize
-from PIL import Image
-from torchmetrics import MetricCollection
-from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
+from torchcvnn.nn.modules.loss import ComplexMSELoss
 
-from models.networks import ConvEncoder, ConvDecoder, Discriminator, UNet_v2, VanillaVAE2
-from models.loss import l1_loss, disc_loss, gen_loss, kullback_leibler_divergence_loss, SSIMLoss
-from models.utils import torch_symetrisation_patch, check_path
+from models.networks import complexVAE
+from models.loss import complex_kullback_leibler_divergence_loss
+from models.utils import check_path
 from models.base_model import BaseModel
 
 
-class AAEModule(BaseModel):
+class ReconstructorModule(BaseModel):
 
     def __init__(self, opt: Namespace, image_out_dir: str) -> None:
         super().__init__(opt, image_out_dir)
-        self.configure_model()
-
-        self.reconstruction_loss = L1Loss()
-        self.discriminator_loss = disc_loss()
-        self.generator_loss = gen_loss()
-
-        self.automatic_optimization = False
-
+        
         self.train_step_outputs = {}
-        self.valid_step_outputs = {}
-
-        self.metrics = MetricCollection({
-            'psnr': PeakSignalNoiseRatio(),
-            'ssim': StructuralSimilarityIndexMeasure()
-        })
-
-    def on_fit_start(self):
+    
+    def on_fit_start(self) -> None:
         check_path(self.image_save_dir)
-        
-    def configure_model(self) -> None:
-        self.encoder = ConvEncoder(
-            im_ch=self.opt.recon_in_channels,
-            nz=self.opt.recon_latent_size,
-            patch_size=self.opt.recon_patch_size
-        )
-        self.decoder = ConvDecoder(
-            im_ch=self.opt.recon_in_channels,
-            nz=self.opt.recon_latent_size,
-            patch_size=self.opt.recon_patch_size
-        )
-        self.discriminator = Discriminator(nz=self.opt.recon_latent_size)
 
-    def configure_optimizers(self) -> Sequence[torch.optim.Optimizer]:
-        encoder_optimizer = Adam(self.encoder.parameters(), lr=self.opt.recon_lr_ae)
-        decoder_optimizer = Adam(self.decoder.parameters(), lr=self.opt.recon_lr_ae)
-        generator_optimizer = Adam(self.encoder.parameters(), lr=self.opt.recon_lr_gen)
-        discriminator_optimizer = Adam(self.discriminator.parameters(), lr=self.opt.recon_lr_disc)
-        # Define schedulers
-        encoder_scheduler = CyclicLR(encoder_optimizer, base_lr=0.001, max_lr=0.01,step_size_up=6948,cycle_momentum=False)
-        decoder_scheduler = CyclicLR(decoder_optimizer, base_lr=0.001, max_lr=0.01,step_size_up=6948,cycle_momentum=False)
-        generator_scheduler = CyclicLR(generator_optimizer, base_lr=0.001, max_lr=0.01,step_size_up=6948,cycle_momentum=False)
-        discriminator_scheduler = CyclicLR(discriminator_optimizer, base_lr=0.001, max_lr=0.01,step_size_up=6948,cycle_momentum=False)
-        return (
-            {"optimizer": encoder_optimizer, "lr_scheduler": encoder_scheduler},
-            {"optimizer": decoder_optimizer, "lr_scheduler": decoder_scheduler},
-            {"optimizer": generator_optimizer, "lr_scheduler": generator_scheduler},
-            {"optimizer": discriminator_optimizer, "lr_scheduler": discriminator_scheduler},
-        )
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.encoder(x)
-    
-    @staticmethod
-    def set_requires_grad(nets: List | nn.Module, requires_grad: bool = False) -> None:
-        if not isinstance(nets, list):
-            nets = [nets]
-        for net in nets:
-            if net is not None:
-                for param in net.parameters():
-                    param.requires_grad = requires_grad
-    
-    def training_step(self, batch: Dict[str, str | torch.Tensor], batch_idx: int) -> None:
-        image = batch['image']
-        encoder_optimizer, decoder_optimizer, generator_optimizer, discriminator_optimizer = self.optimizers()
-        encoder_scheduler, decoder_scheduler, generator_scheduler, discriminator_scheduler = self.lr_schedulers()
-
-        # Reconstruction
-        self.set_requires_grad(self.discriminator, requires_grad=False)
-        encoder_optimizer.zero_grad()
-        decoder_optimizer.zero_grad()
-
-        latent = self(image)
-        reconstruction = self.decoder(latent)
-        reconstruction_loss = 2 * (batch['max'] - batch['min']).mean() * self.reconstruction_loss(reconstruction, image)
-        metrics = self.metrics(reconstruction.detach(), image)
-        
-        self.manual_backward(reconstruction_loss)
-
-        encoder_optimizer.step()
-        decoder_optimizer.step()
-        
-        if batch_idx % 1000 == 0:
-            self.log_image("Input", (image * 255).to(torch.uint8))
-            self.log_image("Reconstruction", (reconstruction * 255).to(torch.uint8))
-            self.log_image("Difference", ((reconstruction - image) * 255).to(torch.uint8))
-
-        # Discriminator
-        self.set_requires_grad(self.discriminator, requires_grad=True)
-        discriminator_optimizer.zero_grad()
-
-        latent = self(image)
-        normal_distribution = torch.randn_like(latent)
-
-        real = self.discriminator(normal_distribution)
-        fake = self.discriminator(latent.detach())
-        discriminator_loss = self.discriminator_loss(real, fake)
-        self.manual_backward(discriminator_loss)
-
-        discriminator_optimizer.step()
-
-        # Generator
-        self.set_requires_grad(self.discriminator, requires_grad=False)
-        generator_optimizer.zero_grad()
-        latent = self(image)
-        fake = self.discriminator(latent)
-        generator_loss = self.generator_loss(fake)
-        self.manual_backward(generator_loss)
-        
-        generator_optimizer.step()
-
-        encoder_scheduler.step()
-        decoder_scheduler.step()
-        generator_scheduler.step()
-        discriminator_scheduler.step()
-        
-        if not self.train_step_outputs:
-            self.train_step_outputs = {
-                "step_rec_loss": [reconstruction_loss], 
-                "step_disc_loss": [discriminator_loss],
-                "step_gen_loss": [generator_loss],
-                "step_metrics_psnr": [metrics['psnr']],
-                "step_metrics_ssim": [metrics['ssim']]
-            }
-        else:
-            self.train_step_outputs["step_rec_loss"].append(reconstruction_loss)
-            self.train_step_outputs["step_disc_loss"].append(discriminator_loss)
-            self.train_step_outputs["step_gen_loss"].append(generator_loss)
-            self.train_step_outputs["step_metrics_psnr"].append(metrics['psnr'])
-            self.train_step_outputs["step_metrics_ssim"].append(metrics['ssim'])
-        
     def on_train_epoch_end(self) -> None:
         tb_logger = self.loggers[0].experiment
         _log_dict = {
@@ -165,159 +36,136 @@ class AAEModule(BaseModel):
         _log_dict_loss = {f'Loss/{key}': value for (key, value) in _log_dict.items() if 'loss' in key}
         for k,v in _log_dict_loss.items():
             tb_logger.add_scalar(k, v, self.current_epoch)
-
-        _log_dict_metrics = {f'Metrics/{key}'.replace('metrics_', ''): value for (key, value) in _log_dict.items() if 'metrics' in key}
-        for k,v in _log_dict_metrics.items():
-            tb_logger.add_scalar(k, v, self.current_epoch)
+            
         self.train_step_outputs.clear()
 
-    def _val_step(self, batch: Dict[str, Tensor | str], loop_idx: int) -> Tensor:
-        image = batch['image'][loop_idx]
-        _, h, w = image.shape
+        return tb_logger, _log_dict
 
-        pred = torch.zeros_like(image)
-        patch_overlap_count = torch.zeros_like(pred)
-
-        if h == self.opt.recon_patch_size:
-            x_range = list(np.array([0]))
-        else:
-            x_range = list(range(0, h - self.opt.recon_patch_size, self.opt.recon_stride))
-            if (x_range[-1] + self.opt.recon_patch_size) < h :
-                x_range.extend(range(h - self.opt.recon_patch_size, h - self.opt.recon_patch_size + 1))
+    def _on_val_pred_start(self, dataset: torch.utils.data.Dataset) -> None:
+        self.pred = []
+        self.patch_overlap_count = []
         
-        if w == self.opt.recon_patch_size:
-            y_range = list(np.array([0]))
-        else:
-            y_range = list(range(0, w - self.opt.recon_patch_size, self.opt.recon_stride))
-            if (y_range[-1] + self.opt.recon_patch_size) < w:
-                y_range.extend(range(w - self.opt.recon_patch_size, w - self.opt.recon_patch_size + 1))
+        for _, data in enumerate(dataset.dataset):
+            shape = data.data.shape
+            dtype = torch.from_numpy(np.array([0], dtype=data.data.dtype)).dtype
+            self.pred.append(torch.zeros(shape, dtype=dtype, device=self.device))
+            self.patch_overlap_count.append(torch.zeros(shape, dtype=dtype, device=self.device))
 
-        for x in x_range:
-            for y in y_range:
-                patch = image[:, x : x + self.opt.recon_patch_size, y : y + self.opt.recon_patch_size]
-                patch = self.decoder(self(patch.unsqueeze(0))).squeeze(0)
-                pred[:, x : x + self.opt.recon_patch_size, y : y + self.opt.recon_patch_size] += patch
-                
-                patch_overlap_count[:, x : x + self.opt.recon_patch_size, y : y + self.opt.recon_patch_size] += torch.ones_like(patch)
+    def on_validation_epoch_start(self) -> None:
+        dataset = self.trainer.datamodule.valid_dataset
+        self._on_val_pred_start(dataset)
+        self.val_reconstruction_loss = []
+
+    def _validation_step(self, pred: Tensor, image: Tensor, batch: Dict[str, Tensor | str], batch_idx: int) -> None:
+        batch_size = len(image)
+        patch_size = self.opt.recon_patch_size
+
+        image_ids = batch['image_id'] - 1
+        cols = batch['col']
+        rows = batch['row']
         
-        pred = torch.div(pred, patch_overlap_count)
-        del patch_overlap_count
-        torch.cuda.empty_cache()
-        
-        return pred, image
-    
-    def validation_step(self, batch: Dict[str, Tensor | str], batch_idx: int) -> None:
-        pred, image = self._val_step(batch, 0)
-        reconstruction_loss = 2 * (batch['max'] - batch['min']).mean() * self.reconstruction_loss(pred, image)
+        for i in range(batch_size):
+            img_id = image_ids[i]
+            col_start, row_start = cols[i], rows[i]
+            col_end, row_end = col_start + patch_size, row_start + patch_size
 
-        pred = pred.cpu()
-        image = image.cpu()
-        val_metrics = MetricCollection({
-            'psnr': PeakSignalNoiseRatio(),
-            'ssim': StructuralSimilarityIndexMeasure()
-        })
-        metrics = val_metrics(pred.unsqueeze(0), image.unsqueeze(0))
-
-        if not self.valid_step_outputs:
-            self.valid_step_outputs = {
-                "step_rec_loss": [reconstruction_loss],
-                "step_val_metrics_psnr": [metrics['psnr']],
-                "step_val_metrics_ssim": [metrics['ssim']]
-            }
-        else:
-            self.valid_step_outputs["step_rec_loss"].append(reconstruction_loss)
-            self.valid_step_outputs["step_metrics_psnr"].append(metrics['psnr'])
-            self.valid_step_outputs["step_metrics_ssim"].append(metrics['ssim'])
-
-        if self.global_step % (self.trainer.num_training_batches * 20) == 0:
-            min, max = batch['min'][0].cpu(), batch['max'][0].cpu()
-            denorm = self.denorm(min, max)
-            pred = denorm(pred)
-            image = denorm(image)
-
-            pred = pred.numpy()
-            image = image.numpy()
-
-            name, ext = self.get_name_ext(batch['filepath'][0])
-            np.save(Path(f'{self.image_save_dir}/out_{name}.npy'), pred)
-            out = Image.fromarray(equalize(pred.transpose(1, 2, 0).squeeze(), plower=0, pupper=100))
-            out.save(Path(f'{self.image_save_dir}/out_{name}.png'))
-            
-            diff = Image.fromarray(equalize((image - pred).transpose(1, 2, 0).squeeze(), plower=0, pupper=100))
-            diff.save(Path(f'{self.image_save_dir}/diff_{name}.png'))
-
-            del out, diff
-        
-        del pred, image
-        torch.cuda.empty_cache()
+            self.pred[img_id][:, col_start : col_end, row_start : row_end].add_(pred[i])
+            self.patch_overlap_count[img_id][:, col_start : col_end, row_start : row_end].add_(torch.ones_like(pred[i]))
 
     def on_validation_epoch_end(self) -> None:
         tb_logger = self.loggers[1].experiment
-        _log_dict = {
-            key.replace('step_', ''): torch.tensor(value).mean()
-            for (key, value) in self.valid_step_outputs.items()
-        }
-        self.log_dict({'val_rec_loss': _log_dict['rec_loss']}, prog_bar=True)
-        tb_logger.add_scalar('Loss/rec_loss', _log_dict['rec_loss'], self.current_epoch)
+        
+        val_reconstruction_loss_ = torch.tensor(self.val_reconstruction_loss).mean()
+        self.log_dict({'val_rec_loss': val_reconstruction_loss_}, prog_bar=True)
+        tb_logger.add_scalar('Loss/rec_loss', val_reconstruction_loss_, self.current_epoch)
 
-        _log_dict_metrics = {key.replace('metrics_', ''): value for (key, value) in _log_dict.items() if 'metrics' in key}
-        self.log_dict(_log_dict_metrics, prog_bar=True)
-        for k,v in _log_dict_metrics.items():
-            tb_logger.add_scalar(f'Metrics/{k}'.replace('val_', ''), v, self.current_epoch)
+        del self.pred, self.patch_overlap_count, self.val_reconstruction_loss
+        torch.cuda.empty_cache()
 
-        self.valid_step_outputs.clear()
-    
-    def on_predict_start(self):
-        super().on_predict_start()
-        self.train()
+    def on_predict_start(self) -> None:
+        os.makedirs(self.image_save_dir, exist_ok=True)
+        
+        dataset = self.trainer.datamodule.pred_dataset
+        self._on_val_pred_start(dataset)
 
     def predict_step(self, batch: Dict[str, Tensor | str], batch_idx: int) -> None:
-        with torch.no_grad():
-            pred, input = self._val_step(batch, 0)
+        self.validation_step(batch, batch_idx, compute_loss=False)
+
+    def on_predict_end(self) -> None:
+        dataset = self.trainer.datamodule.pred_dataset
         
-        min, max = batch['min'][0], batch['max'][0]
-        denorm = self.denorm(min, max)
-        pred = denorm(pred)
-        input = denorm(input)
+        for i, data in enumerate(dataset.dataset):
+            image_ids = i - 1
+            min, max = dataset.dataset_min, dataset.dataset_max
+            denorm = self.denorm(min, max)
+            
+            pred_ = torch.div(self.pred[image_ids], self.patch_overlap_count[image_ids])
+            pred_ = pred_.cpu().data.numpy()
+            pred_ = denorm(pred_)
+            
+            name, ext = self.get_name_ext(data.filepath, add_epoch=False)
+            np.save(Path(f'{self.image_save_dir}/pred_{name}{ext}'), pred_)
 
-        anomaly_map = self.create_anomaly_map(pred, input)
-        pred = pred.cpu().data.numpy()
-        input = input.cpu().data.numpy()
-        anomaly_map = anomaly_map.cpu().data.numpy()
-
-        name, ext = self.get_name_ext(batch['filepath'][0], add_epoch=False)
-        np.save(Path(f'{self.image_save_dir}/pred_{name}{ext}'), pred)
-        np.save(Path(f'{self.image_save_dir}/anomaly_{name}{ext}'), anomaly_map)
-
-        anomaly_map = Image.fromarray((anomaly_map * 255).astype(np.uint8))
-        anomaly_map.save(Path(f'{self.image_save_dir}/anomaly_{name}.png'))
+    def on_test_start(self) -> None:
+        version_number = self.opt.version.split("AE")[1]
+        self.anomaly_map_dir = str(self.image_save_dir).replace(f'reconstructed{version_number}', f'rec_cplxVAE{version_number}_full_slc_{self.opt.recon_anomaly_kernel}')
+        os.makedirs(self.anomaly_map_dir, exist_ok=True)
         
-        del pred
-        torch.cuda.empty_cache()
-        
+        dataset = self.trainer.datamodule.test_dataset.images
+        self.anomaly_map = []
+        for i, image in enumerate(dataset):
+            dtype = torch.from_numpy(np.array([0], dtype=image.input.dtype)).dtype
+            self.anomaly_map.append(torch.zeros((image.height, image.width), dtype=dtype, device=self.device))
 
-class VAEModule(BaseModel):
+    def test_step(self, batch: Dict[str, Tensor | str], batch_idx: int) -> None:
+        pred, input = batch['reconstructed'], batch['input']
+        
+        pred_cov, _ = self.compute_scm_smv(pred.view(*pred.shape[:2], -1))
+        input_cov, _ = self.compute_scm_smv(input.view(*input.shape[:2], -1))
+        
+        anomaly_score = torch.linalg.norm(pred_cov - input_cov, ord='fro', dim=(1, 2)) ** 2
+        
+        image_ids = batch['image_id'] - 1
+        cols = batch['col']
+        rows = batch['row']
+        for (id, col, row, score) in zip(image_ids, cols, rows, anomaly_score):
+            self.anomaly_map[id][col, row] = score
+
+    def on_test_end(self) -> None:
+        dataset = self.trainer.datamodule.test_dataset
+        
+        for i, data in enumerate(dataset.images):
+            input = data.input
+            pred = data.reconstructed
+            
+            frobenius_anomaly_map = self.anomaly_map[i].real.cpu().data.numpy()
+            manhattan_anomaly_map, sum_manhattan_anomaly_map = self.create_manhattan_anomaly_map(pred, input)
+            euclidean_anomaly_map, sum_euclidean_anomaly_map = self.create_euclidean_anomaly_map(pred, input)
+            
+            name, ext = self.get_name_ext(dataset.filepath_input[i], add_epoch=False) # Attention here, check if i is really the image
+            np.save(Path(f'{self.anomaly_map_dir}/frobenius_anomaly_{name}{ext}'), frobenius_anomaly_map)
+            np.save(Path(f'{self.anomaly_map_dir}/manhattan_anomaly_{name}{ext}'), manhattan_anomaly_map)
+            np.save(Path(f'{self.anomaly_map_dir}/sum_manhattan_anomaly_{name}{ext}'), sum_manhattan_anomaly_map)
+            np.save(Path(f'{self.anomaly_map_dir}/euclidean_anomaly_{name}{ext}'), euclidean_anomaly_map)
+            np.save(Path(f'{self.anomaly_map_dir}/sum_euclidean_anomaly_{name}{ext}'), sum_euclidean_anomaly_map)
+            np.save(Path(f'{self.anomaly_map_dir}/diff_anomaly_{name}{ext}'), pred - input)
+
+
+class VAEModule(ReconstructorModule):
+
     def __init__(self, opt: Namespace, image_out_dir: str) -> None:
         super().__init__(opt, image_out_dir)
 
-        self.model = VanillaVAE2(in_channels=opt.recon_in_channels, latent_dim=opt.recon_latent_size, input_size=opt.recon_patch_size)
-        self.reconstruction_loss = MSELoss()
-        self.kld_loss = kullback_leibler_divergence_loss
-        
-        self.train_step_outputs = {}
-        self.valid_step_outputs = {}
-
-        self.metrics = MetricCollection({
-            'psnr': PeakSignalNoiseRatio(),
-            'ssim': StructuralSimilarityIndexMeasure()
-        })
-        
     def forward(self, x: Tensor) -> Sequence[Tensor]:
-        return self.model(x)
+        if self.opt.recon_model == 'cplxvae':
+            z, mu, sigma, delta = self.model(x)
+            return self.model.decode(z), mu, sigma, delta
+        
+        z, mu, log_var = self.model(x)
+        return self.model.decode(z), mu, log_var
     
-    def configure_optimizers(self):
-        optimizer = Adam(self.model.parameters(), lr=self.opt.recon_lr_ae)
-        return optimizer
+    def configure_optimizers(self) -> torch.optim.Optimizer:
+        return Adam(self.model.parameters(), lr=self.opt.recon_lr_ae)
     
     def get_current_beta(self) -> float:
         if self.opt.recon_beta_proportion > 1 or self.opt.recon_beta_proportion < 0:
@@ -326,300 +174,110 @@ class VAEModule(BaseModel):
         # Warmup
         if self.current_epoch < self.opt.recon_beta_warmup_epochs:
             return self.opt.recon_beta_start
-
-        # Cyclical annealing
-        cycle_size = self.total_beta_iterations // 4
-        beta_step = self.global_step - self.opt.recon_beta_warmup_epochs * self.trainer.num_training_batches
-        tau = (beta_step % cycle_size) / cycle_size
-        if tau < self.opt.recon_beta_proportion:
-            return self.opt.recon_beta_start + (
-                self.opt.recon_beta_end - self.opt.recon_beta_start
-            ) * (tau / self.opt.recon_beta_proportion)
+        
+        if not self.opt.recon_regulate_beta:
+            return self.opt.recon_beta_end
+        
+        current_beta_epoch = self.current_epoch + 1 - self.opt.recon_beta_warmup_epochs
+        if self.opt.beta_warmup_type == 'linear' and current_beta_epoch <= self.total_beta_iterations:
+        #Linear annealing
+            return min(
+                self.opt.recon_beta_end, 
+                self.opt.recon_beta_start + (self.opt.recon_beta_end - self.opt.recon_beta_start) * current_beta_epoch / self.total_beta_iterations
+            )
+        elif self.opt.beta_warmup_type == 'cyclical':
+            # Cyclical annealing
+            cycle_size = self.total_beta_iterations // 4
+            beta_step = self.global_step - self.opt.recon_beta_warmup_epochs * self.trainer.num_training_batches
+            tau = (beta_step % cycle_size) / cycle_size
+            if tau < self.opt.recon_beta_proportion:
+                return self.opt.recon_beta_start + (
+                    self.opt.recon_beta_end - self.opt.recon_beta_start
+                ) * (tau / self.opt.recon_beta_proportion)
 
         return self.opt.recon_beta_end
-    
-    def on_fit_start(self):
-        check_path(self.image_save_dir)
-    
-    def on_train_start(self):
+
+    def on_train_start(self) -> None:
         if self.trainer.max_epochs < 20:
             raise ValueError("Training epochs should be at least 20")
         self.max_beta_epochs = self.trainer.max_epochs - 5
-        self.total_beta_iterations = (
-            self.max_beta_epochs - self.opt.recon_beta_warmup_epochs
-        ) * self.trainer.num_training_batches
-    
-    def training_step(self, batch: Dict[str, str | Tensor], batch_idx: int) -> Tensor:
-        image = batch['image']
+        if self.opt.beta_n_epochs is None:
+            self.total_beta_iterations = (self.max_beta_epochs - self.opt.recon_beta_warmup_epochs) * self.trainer.num_training_batches
+        else:
+            self.total_beta_iterations = self.opt.beta_n_epochs
 
-        reconstruction, mu, log_var = self(image)
+    def _training_step(self, reconstruction: Tensor, image: Tensor, reconstruction_loss: Tensor, kld_loss: Tensor, classification_loss: Tensor) -> Tensor:
         beta = self.get_current_beta()
-        reconstruction_loss = self.reconstruction_loss(reconstruction, image)
-        kld_loss = self.kld_loss(mu, log_var, 1e-4)
-        loss = reconstruction_loss + beta * kld_loss
-        metrics = self.metrics(reconstruction.detach(), image)
+        loss = reconstruction_loss + beta * kld_loss + classification_loss
 
         if self.global_step % (self.trainer.num_training_batches * 25) == 0:
+            reconstruction = torch.abs(reconstruction[0])
+            image = torch.abs(image)
+            
             self.log_image("Input", (image * 255).to(torch.uint8))
             self.log_image("Reconstruction", (reconstruction * 255).to(torch.uint8))
             self.log_image("Difference", ((reconstruction - image) * 255).to(torch.uint8))
 
         if not self.train_step_outputs:
             self.train_step_outputs = {
-                "step_loss": [loss],
-                "step_rec_loss": [reconstruction_loss],
-                "step_kld_loss": [kld_loss],
-                "step_beta": [beta],
-                "step_metrics_psnr": [metrics['psnr']],
-                "step_metrics_ssim": [metrics['ssim']]
+                "step_loss": [loss.detach()],
+                "step_rec_loss": [reconstruction_loss.detach()],
+                "step_kld_loss": [kld_loss.detach()],
+                "step_classification_loss": [classification_loss.detach()],
+                "step_beta": [beta]
             }
         else:
-            self.train_step_outputs["step_loss"].append(loss)
-            self.train_step_outputs["step_rec_loss"].append(reconstruction_loss)
-            self.train_step_outputs["step_kld_loss"].append(kld_loss)
+            self.train_step_outputs["step_loss"].append(loss.detach())
+            self.train_step_outputs["step_rec_loss"].append(reconstruction_loss.detach())
+            self.train_step_outputs["step_kld_loss"].append(kld_loss.detach())
+            self.train_step_outputs["step_classification_loss"].append(classification_loss.detach())
             self.train_step_outputs["step_beta"].append(beta)
-            self.train_step_outputs["step_metrics_psnr"].append(metrics['psnr'])
-            self.train_step_outputs["step_metrics_ssim"].append(metrics['ssim'])
             
         return loss
     
+    def validation_step(self, batch: Dict[str, Tensor | str], batch_idx: int, compute_loss: bool) -> None:
+        image = batch['image']
+        pred_ = self(image)[0]
+
+        if compute_loss:
+            self.val_reconstruction_loss.append(self.reconstruction_loss(pred_, image))
+            
+        super()._validation_step(pred_, image, batch, batch_idx)
+
     def on_train_epoch_end(self) -> None:
-        tb_logger = self.loggers[0].experiment
-        _log_dict = {
-            key.replace('step_', ''): torch.tensor(value).mean()
-            for (key, value) in self.train_step_outputs.items()
-        }
+        tb_logger, _log_dict = super().on_train_epoch_end()
         tb_logger.add_scalar('Beta', _log_dict['beta'], self.current_epoch)
 
-        _log_dict_loss = {f'Loss/{key}': value for (key, value) in _log_dict.items() if 'loss' in key}
-        for k,v in _log_dict_loss.items():
-            tb_logger.add_scalar(k, v, self.current_epoch)
 
-        _log_dict_metrics = {f'Metrics/{key}'.replace('metrics_', ''): value for (key, value) in _log_dict.items() if 'metrics' in key}
-        for k,v in _log_dict_metrics.items():
-            tb_logger.add_scalar(k, v, self.current_epoch)
-
-        self.train_step_outputs.clear()
-        
-    def _val_step(self, batch: Dict[str, Tensor | str], loop_idx: int) -> Tensor:
-        image = batch['image'][loop_idx]
-        _, h, w = image.shape
-        denorm = self.denorm(batch['min'][loop_idx], batch['max'][loop_idx])
-
-        pred = torch.zeros_like(image, device=self.device)
-        patch_overlap_count = torch.zeros_like(pred, device=self.device)
-
-        if h == self.opt.recon_patch_size:
-            x_range = list(np.array([0]))
-        else:
-            x_range = list(range(0, h - self.opt.recon_patch_size, self.opt.recon_stride))
-            if (x_range[-1] + self.opt.recon_patch_size) < h :
-                x_range.extend(range(h - self.opt.recon_patch_size, h - self.opt.recon_patch_size + 1))
-        
-        if w == self.opt.recon_patch_size:
-            y_range = list(np.array([0]))
-        else:
-            y_range = list(range(0, w - self.opt.recon_patch_size, self.opt.recon_stride))
-            if (y_range[-1] + self.opt.recon_patch_size) < w:
-                y_range.extend(range(w - self.opt.recon_patch_size, w - self.opt.recon_patch_size + 1))
-
-        for x in x_range:
-            for y in y_range:
-                patch = image[:, x : x + self.opt.recon_patch_size, y : y + self.opt.recon_patch_size]
-                patch = self(patch.unsqueeze(0))[0].squeeze(0)
-                pred[:, x : x + self.opt.recon_patch_size, y : y + self.opt.recon_patch_size] += patch
-                
-                patch_overlap_count[:, x : x + self.opt.recon_patch_size, y : y + self.opt.recon_patch_size] += torch.ones_like(patch, device=self.device)
-        
-        pred = torch.div(pred, patch_overlap_count)
-        del patch_overlap_count
-        pred = denorm(pred)
-        image = denorm(image)
-        torch.cuda.empty_cache()
-        
-        return pred, image
+class ComplexVAEModule(VAEModule):
     
-    def validation_step(self, batch: Dict[str, Tensor | str], batch_idx: int) -> None:
-        pred, image = self._val_step(batch, 0)
-        reconstruction_loss = self.reconstruction_loss(pred, image)
-        pred = pred.cpu()
-        image = image.cpu()
-        val_metrics = MetricCollection({
-            'psnr': PeakSignalNoiseRatio(),
-            'ssim': StructuralSimilarityIndexMeasure()
-        })
-        metrics = val_metrics(pred.unsqueeze(0), image.unsqueeze(0))
-
-        if not self.valid_step_outputs:
-            self.valid_step_outputs = {
-                "step_rec_loss": [reconstruction_loss],
-                "step_val_metrics_psnr": [metrics['psnr']],
-                "step_val_metrics_ssim": [metrics['ssim']]
-            }
-        else:
-            self.valid_step_outputs["step_rec_loss"].append(reconstruction_loss)
-            self.valid_step_outputs["step_metrics_psnr"].append(metrics['psnr'])
-            self.valid_step_outputs["step_metrics_ssim"].append(metrics['ssim'])
-
-        if self.global_step % (self.trainer.num_training_batches * 50) == 0:
-            pred = pred.numpy()
-            image = image.numpy()
-
-            name, ext = self.get_name_ext(batch['filepath'][0])
-            np.save(Path(f'{self.image_save_dir}/out_{name}.npy'), pred)
-            out = Image.fromarray(equalize(pred.transpose(1, 2, 0).squeeze(), plower=0, pupper=100))
-            out.save(Path(f'{self.image_save_dir}/out_{name}.png'))
-            
-            diff = Image.fromarray(equalize((image - pred).transpose(1, 2, 0).squeeze(), plower=0, pupper=100))
-            diff.save(Path(f'{self.image_save_dir}/diff_{name}.png'))
-
-            del out, diff
-        
-        del pred, image
-        torch.cuda.empty_cache()
-
-    def on_validation_epoch_end(self) -> None:
-        tb_logger = self.loggers[1].experiment
-        _log_dict = {
-            key.replace('step_', ''): torch.tensor(value).mean()
-            for (key, value) in self.valid_step_outputs.items()
-        }
-        self.log_dict({'val_rec_loss': _log_dict['rec_loss']}, prog_bar=True)
-        tb_logger.add_scalar('Loss/rec_loss', _log_dict['rec_loss'], self.current_epoch)
-
-        _log_dict_metrics = {key.replace('metrics_', ''): value for (key, value) in _log_dict.items() if 'metrics' in key}
-        self.log_dict(_log_dict_metrics, prog_bar=True)
-        for k,v in _log_dict_metrics.items():
-            tb_logger.add_scalar(f'Metrics/{k}'.replace('val_', ''), v, self.current_epoch)
-
-        self.valid_step_outputs.clear()
-    
-    def predict_step(self, batch: Dict[str, Tensor | str], batch_idx: int) -> None:
-        pred, input = self._val_step(batch, 0)
-        
-        anomaly_map = self.create_anomaly_map(pred, input)
-        anomaly_map = anomaly_map.cpu().data.numpy()
-        pred = pred.cpu().data.numpy()
-
-        name, ext = self.get_name_ext(batch['filepath'][0], add_epoch=False)
-        np.save(Path(f'{self.image_save_dir}/pred_{name}{ext}'), pred)
-        np.save(Path(f'{self.image_save_dir}/anomaly_{name}{ext}'), anomaly_map)
-        anomaly_map = Image.fromarray((anomaly_map * 255).astype(np.uint8))
-        anomaly_map.save(Path(f'{self.image_save_dir}/anomaly_{name}.png'))
-        
-        del pred, anomaly_map, input
-        torch.cuda.empty_cache()
-
-
-class MERLINModule(BaseModel):
     def __init__(self, opt: Namespace, image_out_dir: str) -> None:
         super().__init__(opt, image_out_dir)
-        self.model = UNet_v2()
 
-        self.loss = MSELoss()
+        self.model = complexVAE(
+            num_channels=self.opt.recon_in_channels,
+            num_layers=4,
+            channels_ratio=32,
+            activation=c_nn.modReLU(),
+            latent_compression=self.opt.recon_latent_compression
+        )
+        self.model.initialize_weights()
+        self.kld_loss = complex_kullback_leibler_divergence_loss
+        self.reconstruction_loss = ComplexMSELoss()
+        self.classification_loss = nn.BCEWithLogitsLoss()
 
-        self.train_step_output = []
+    def training_step(self, batch: Dict[str, str | Tensor], batch_idx: int) -> Tensor:
+        image = batch['image']
 
-        self.valid_patch_size = 256
-        self.valid_stride = 64
+        reconstruction, mu, sigma, delta = self(image)
+        reconstruction_loss = self.reconstruction_loss(reconstruction[0], image)
+        kld_loss = self.kld_loss(mu, sigma, delta, self.opt.kld_weight)
+        classification_loss = torch.tensor(0., device=self.device)
         
-    def forward(self, x: Tensor) -> Tensor:
-        return self.model(x)
-
-    def configure_optimizers(self) -> Dict[str, torch.optim.Optimizer | torch.optim.lr_scheduler.LRScheduler]:
-        optimizer = Adam(params=self.parameters(), lr=self.opt.despeckler_lr)
-        return {
-            'optimizer': optimizer,
-            'lr_scheduler': MultiStepLR(optimizer, milestones=[5, 20])
-        }
-        
-    def on_fit_start(self):
-        check_path(self.image_save_dir)
-    
-    def training_step(self, batch: Dict[str, Tensor | str], batch_idx: int) -> Tensor:
-        input, target = batch['real'], batch['imag']
-        if np.random.uniform() > 0.5:
-            input, target = batch['imag'], batch['real']
-
-        loss = self.loss(self(input), target)
-        self.log('step_loss', loss, prog_bar=True)
-        self.train_step_output.append(loss)
-
-        return loss
-    
-    def on_train_epoch_end(self) -> None:
-        loss = torch.tensor(self.train_step_output).mean()
-        self.log('loss', loss)
-        self.logger.experiment.add_scalar('loss', loss, self.current_epoch)
-        self.train_step_output.clear()
-        
-    def _val_pred_step(self, batch: Dict[str, Tensor | str], loop_idx: int) -> Tensor:
-        h, w = batch['real'][loop_idx].shape
-        denorm = self.denorm(batch['min'][loop_idx], batch['max'][loop_idx])
-
-        pred_real = torch.zeros(h, w, device=self.device)
-        pred_imag = torch.zeros(h, w, device=self.device)
-
-        patch_overlap_count = torch.zeros(h, w, device=self.device)
-
-        if h == self.valid_patch_size:
-            x_range = list(np.array([0]))
-        else:
-            x_range = list(range(0, h - self.valid_patch_size, self.valid_stride))
-            if (x_range[-1] + self.valid_patch_size) < h :
-                x_range.extend(range(h - self.valid_patch_size, h - self.valid_patch_size + 1))
-        
-        if w == self.valid_patch_size:
-            y_range = list(np.array([0]))
-        else:
-            y_range = list(range(0, w - self.valid_patch_size, self.valid_stride))
-            if (y_range[-1] + self.valid_patch_size) < w:
-                y_range.extend(range(w - self.valid_patch_size, w - self.valid_patch_size + 1))
-
-        for x in x_range:
-            for y in y_range:
-                real_patch = batch['real'][loop_idx][x : x + self.valid_patch_size, y : y + self.valid_patch_size]
-                imag_patch = batch['imag'][loop_idx][x : x + self.valid_patch_size, y : y + self.valid_patch_size]
-                
-                real_patch, imag_patch = torch_symetrisation_patch(real_patch, imag_patch)
-
-                real_patch = self(real_patch.unsqueeze(0).unsqueeze(0))
-                pred_real[x : x + self.valid_patch_size, y : y + self.valid_patch_size] += real_patch.squeeze()
-
-                imag_patch = self(imag_patch.unsqueeze(0).unsqueeze(0))
-                pred_imag[x : x + self.valid_patch_size, y : y + self.valid_patch_size] += imag_patch.squeeze()
-
-                patch_overlap_count[x : x + self.valid_patch_size, y : y + self.valid_patch_size] += torch.ones(self.valid_patch_size, self.valid_patch_size, device=self.device)
-        
-        pred_real = torch.div(pred_real, patch_overlap_count)
-        pred_imag = torch.div(pred_imag, patch_overlap_count)
-        del patch_overlap_count
-        torch.cuda.empty_cache()
-        
-        pred_real = denorm(pred_real).cpu().data.numpy()
-        pred_imag = denorm(pred_imag).cpu().data.numpy()
+        if self.opt.recon_classification_guided:
+            classification_loss = self.classification_loss(reconstruction[1], batch['label'])
             
-        return pred_real + 1j * pred_imag
+        return super()._training_step(reconstruction, image, reconstruction_loss, kld_loss, classification_loss)
     
-    def validation_step(self, batch: Dict[str, Tensor | str], batch_idx: int) -> None:
-        pred_cpx = self._val_pred_step(batch, 0)
-
-        name, ext = self.get_name_ext(batch['filepath'][0])
-        image = Image.fromarray(equalize(pred_cpx))
-        image.save(Path(f'{self.image_save_dir}/{name}.png'))
-
-        np.save(Path(f'{self.image_save_dir}/{name}{ext}'), pred_cpx)
-    
-    def on_predict_start(self):
-        self.valid_stride = 32
-            
-    def predict_step(self, batch: Dict[str, Tensor | str], batch_idx: int) -> None:
-        pred = self._val_pred_step(batch, 0)
-        phase = batch['image_phase'][0].cpu().data.numpy()
-        pred = np.abs(pred) * np.exp(1j * phase)
-        
-        name, ext = self.get_name_ext(batch['filepath'][0], add_epoch=False)
-        np.save(Path(f'{self.image_save_dir}/{name}{ext}'), pred)
-        
-        del pred, phase
-        torch.cuda.empty_cache()
+    def validation_step(self, batch: Dict[str, str | Tensor], batch_idx: int, compute_loss: bool = True) -> None:
+        return super().validation_step(batch, batch_idx, compute_loss)
