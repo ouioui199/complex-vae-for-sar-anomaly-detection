@@ -1,22 +1,19 @@
 # Anomaly Detection in SAR imaging
 
 ## Abstract
-We propose an unsupervised learning approach for anomaly detection in SAR imaging. The proposed model combines a preprocessing despeckling step, a $\beta$ Variational Auto-Encoder (VAE) for unsupervised anomaly filtering, and an anomaly detector based on the change of the covariance matrix at the input and output of the $\beta$-VAE network. Experiments have been carried out on X-band ONERA polarimetric SAR images to demonstrate the effectiveness of Beta VAE compared with the methods proposed in the literature.
+We propose an unsupervised learning approach for anomaly detection in SAR imaging. The proposed model combines a complex-valued $\beta$ Variational Auto-Encoder (VAE) for unsupervised anomaly filtering, and an change detector based on the covariance matrix at the input and output of the $\beta$-VAE network.
 
 ## Architecture
-Real-valued Variational AutoEncoder
-![VAE architecture](images/VAE-6c.png)
-
 Complex-valued Variational AutoEncoder
 ![VAE architecture](images/complexVAE.png)
 
 ## Getting started
-Anomaly Detection in SAR imaging with Adversarial AutoEncoder, Variational AutoEncoder and Reed-Xiaoli Detector.
+Anomaly Detection in SAR imaging with complex-valued Variational AutoEncoder and Reed-Xiaoli Detector.
 To begin, clone the repository with ssh or https:
 
 ```
-git clone git@gitlab-research.centralesupelec.fr:anomaly-detection-huy/aae_huy.git
-git clone https://gitlab-research.centralesupelec.fr/anomaly-detection-huy/aae_huy.git
+git clone git@github.com:ouioui199/complex-vae-for-sar-anomaly-detection.git
+git clone https://github.com/ouioui199/complex-vae-for-sar-anomaly-detection.git
 ```
 
 ### Environment
@@ -45,7 +42,6 @@ For quad-polarization images, the data folder container MUST be organized like b
 |   |- X_band/
 |   |   |- train/
 |   |   |- predict/
-|   |   |   |- despeckled/
 |   |   |   |- reconstructed/
 |   |   |   |- slc/
 |   |   |   |   |- something_Combined_something.npy
@@ -56,7 +52,6 @@ For quad-polarization images, the data folder container MUST be organized like b
 |- data_folder2/
 |   |- L_band/
 |   |   |- train/
-|   |   |   |- despeckled/
 |   |   |   |- reconstructed/
 |   |   |   |- slc/
 |   |   |   |   |- something_Combined_something.npy
@@ -68,48 +63,35 @@ For quad-polarization images, the data folder container MUST be organized like b
 |   |- UHF_band/
 etc.
 ```
-HvVh polarization should be pre-computed from Hv and Vh, with HvVh = (Hv + Vh) / 2. Normalization values will be computed automatically during the data processing, you don't need to do anything. **If the 'something_Combined_something.npy' files aren't available, run the 'combine_polar_channels' function in scripts/utils.py file.**
 
 ## Data preparation
-Let's say you wish to train with data stored in ```DATADIR=/your/data/folder/data_folder1```. The code will operate as below:
-
-![Workflow](images/Workflow.png)
-
-**Note: Preparing despeckled data are not mandatory if you wish to train directly on Single Look Complex.**
-
 Anomaly map computed with the Reed-Xiaoli detector can be computed with the command below. Note that this code works with 4 polarization SAR images.
 ```python
-python compute_RX.py --version 0 --data_band your-choice --datadir /your/data/folder/data_folder1 --rx_box_car_size your-choice --rx_exclusion_window_size your-choice
+python compute_RX.py --version 0 --data_band your-choice --datadir /your/data/folder/ --rx_box_car_size your-choice --rx_exclusion_window_size your-choice --rx_type your-choice
+```
+
+To evaluate with cross-shaped synthetic anomalies, run the file ```create_synthetic_anomalies.py```. Change line 141 and 142 to your data path, and change any class default arguments if needed from line 152 to 154.
+```python
+python create_synthetic_anomalies.py
 ```
 
 ## Training
 
 ### Step 1
-To work with despeckled data, first, you need to train the despeckler. We will use [MERLIN](https://ieeexplore.ieee.org/document/9617648) algorithms. Otherwise, skip to step 2.
-
-The code will outputs and save checkpoints to ```weights_storage/version_X/despeckler/*.ckpt```. Remember to change 'X' to your version. In the shell file has already been programmed to run sequentially 4 channels of a full polarization SAR image. If you wish to run it only on certain channel, comment the concerned code.
-```
-bash train_despeckler.sh > train_despeckler_log.txt 2>&1
-```
-
-The despeckler training has now finished, you must compute predictions to get despeckled SAR images. To compute predictions, run
-```
-bash predict_despeckler.sh > pred_despeckler_log.txt 2>&1
-```
-
-### Step 2
-
-To train the reconstruction network (VAE, complex-valued VAE or AAE), run
+To train the complex-valued VAE, run
 ```
 bash train_reconstructor.sh > train_recon_log.txt 2>&1
 ```
 
 To train or predict with Single Look Complex images, remove the argument ```--recon_train_slc``` in the shell script.
 
+### Step 2
 To perform predictions, run
 ```
 bash predict_reconstructor.sh > pred_recon_log.txt 2>&1
 ```
+
+The code will perform forward passes during prediction and output a reconstructed image. Then during the test process, it will compute the anomaly maps with the Frobenius change detector. By default, the code will test only with Frobenius boxcar of size 9x9 and 5x5. If you wish to test other boxcar size, feel free the change the ```ANOMALY_KERNEL=9``` argument in the shell script. To perform tests, we only need to predict once, so remember to add ```--recon_predict``` argument when calling code for the first time.
 
 ## Folder structure
 Once start running the code, the folder will be organized as below. After cloning the code, create environments, install dependencies, you can start immediately the training. No further actions are required. All folders will be created automatically.
@@ -118,22 +100,16 @@ Once start running the code, the folder will be organized as below. After clonin
 |- scripts/
 |   |- datasets/
 |   |- models/
-|   |- predict_despeckler.py
 |   |- predict_reconstructor.py
-|   |- train_despeckler.py
 |   |- train_reconstructor.py
 |   |- utils.py
 |- training_logs/
 |   |- version X/
-|   |   |- despeckler
-|   |   |   |- visualization
-|   |   |   |- validation_samples
 |   |   |- reconstructor
 |   |   |   |- visualization
 |   |   |   |- validation_samples
 |- weights_storage/
 |   |- version X/
-|   |   |- despeckler
 |   |   |- reconstructor
 |- .gitignore
 |- compute_RX.py
@@ -141,8 +117,6 @@ Once start running the code, the folder will be organized as below. After clonin
 |- create_synthetic_anomalies.py
 |- README.md
 |- requirements.txt
-|- predict_despeckler.sh
 |- predict_reconstructor.sh
-|- train_despeckler.sh
 |- train_reconstructor.sh
 ```
