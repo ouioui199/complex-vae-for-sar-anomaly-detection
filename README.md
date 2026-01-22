@@ -83,7 +83,7 @@ To train the complex-valued VAE, run
 bash train_reconstructor.sh > train_recon_log.txt 2>&1
 ```
 
-To train or predict with Single Look Complex images, remove the argument ```--recon_train_slc``` in the shell script.
+To train or predict with Single Look Complex images, remove the argument ```--recon_train_slc``` in the shell script. Note that logs will be registered in the ```train_recon_log.txt``` file.
 
 ### Step 2
 To perform predictions, run
