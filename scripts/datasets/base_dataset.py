@@ -23,8 +23,7 @@ class ReconstructorFile(ABC):
         self.filepath = filepath
         self.phase = phase
         # Load image
-        self.data = np.load(filepath, mmap_mode='r')
-        self.data = np.abs(self.data) if 'cplx' not in opt.recon_model else self.data            
+        self.data = np.load(filepath, mmap_mode='r')    
         # Get min and max for normalization
         self.min_val, self.max_val = self.get_min_max() if phase == 'train' else np.array(self.opt.normalization_values)
         if len(self.min_val) != len(self.max_val):
@@ -82,7 +81,7 @@ class BaseDataset(ABC, Dataset):
         self.data_dir = os.path.join(opt.datadir, opt.data_band + '_band') if opt.data_band else opt.datadir
         self.data_dir = os.path.join(self.data_dir, 'train' if phase in ['train', 'valid'] else 'predict')
         self.normalize = T.MinMaxNormalize
-        self.to_tensor = ToTensor('float32') if 'cplx' not in opt.recon_model else ToTensor('complex64')
+        self.to_tensor = ToTensor('complex64')
     
     def get_normalization(self) -> None:
         self.dataset_min = np.min([i.min_val for i in self.dataset], axis=0)

@@ -157,12 +157,8 @@ class VAEModule(ReconstructorModule):
         super().__init__(opt, image_out_dir)
 
     def forward(self, x: Tensor) -> Sequence[Tensor]:
-        if self.opt.recon_model == 'cplxvae':
-            z, mu, sigma, delta = self.model(x)
-            return self.model.decode(z), mu, sigma, delta
-        
-        z, mu, log_var = self.model(x)
-        return self.model.decode(z), mu, log_var
+        z, mu, sigma, delta = self.model(x)
+        return self.model.decode(z), mu, sigma, delta
     
     def configure_optimizers(self) -> torch.optim.Optimizer:
         return Adam(self.model.parameters(), lr=self.opt.recon_lr_ae)

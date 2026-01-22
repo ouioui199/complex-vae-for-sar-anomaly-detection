@@ -109,10 +109,7 @@ class ReconstructorTestFile:
         self.opt = opt
         
         self.input = np.load(filepath_input, mmap_mode='r')
-        self.input = np.abs(self.input) if 'cplx' not in opt.recon_model else self.input
-
         self.reconstructed = np.load(filepath_reconstructed, mmap_mode='r')
-        self.reconstructed = np.abs(self.reconstructed) if 'cplx' not in opt.recon_model else self.reconstructed
 
         _, self.height, self.width = self.input.shape
         self.half_kernel = opt.recon_anomaly_kernel // 2
