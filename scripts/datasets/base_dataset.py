@@ -4,8 +4,12 @@ from abc import ABC, abstractmethod
 import os, glob
 
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 from torch.utils.data import Dataset
 from torchcvnn.transforms import ToTensor
+from torchcvnn.transforms.functional import equalize
 
 import datasets.utils as D_U
 import datasets.transforms as T
@@ -23,7 +27,26 @@ class ReconstructorFile(ABC):
         self.filepath = filepath
         self.phase = phase
         # Load image
-        self.data = np.load(filepath, mmap_mode='r')    
+        if 'DSO' in filepath:
+            self.data, _, _ = D_U.process_dot_mat(opt, filepath, np)
+        else:
+            self.data = np.load(filepath, mmap_mode='r')
+
+        self.data = D_U.process_image_representation(self.data, np, opt)
+        if hasattr(self.opt, 'recon_classification_guided') and self.opt.recon_classification_guided and phase == 'train':
+            rx_path = filepath.replace('Combined', 'RX-SCM-shift')
+            if not os.path.exists(rx_path):
+                raise FileNotFoundError(f"RX map file not found at {rx_path}. Please compute the RX map before using classification guided reconstruction.")
+            
+            self.data_rx = np.load(rx_path, mmap_mode='r')
+            self.data = self.data[
+                :, 
+                opt.rx_box_car_size // 2 : -opt.rx_box_car_size // 2, 
+                opt.rx_box_car_size // 2 : -opt.rx_box_car_size // 2
+            ]
+            assert self.data.shape[1:] == self.data_rx.shape[1:], f"Image and RX map shape mismatch: {self.data.shape} != {self.data_rx.shape}"
+            self.data_rx = D_U.set_probability_false_alarm(np.log(self.data_rx), 0.05, binarize=True)[0]
+            
         # Get min and max for normalization
         self.min_val, self.max_val = self.get_min_max() if phase == 'train' else np.array(self.opt.normalization_values)
         if len(self.min_val) != len(self.max_val):
@@ -34,11 +57,15 @@ class ReconstructorFile(ABC):
         # Ensure CHW format
         self.data = D_U.ensure_chw_format(self.data)
         self.data = self.get_train_valid('data')
+        self.data_rx = self.get_train_valid('data_rx') if hasattr(self, 'data_rx') else None
+
+        if hasattr(self, 'label'):
+            self.label = self.get_train_valid('label')
 
     def get_train_valid(self, data_name: str) -> Dict[str, np.ndarray]:
-        _, h, w = self.data.shape
-        train_valid_threshold = int(max(h, w) * self.opt.train_valid_ratio[0])
         data = getattr(self, data_name)
+        _, h, w = data.shape
+        train_valid_threshold = int(max(h, w) * self.opt.train_valid_ratio[0])
         axis = 1 if h > w else 2
         train_valid = {
             'train': np.take(data, range(train_valid_threshold), axis=axis),

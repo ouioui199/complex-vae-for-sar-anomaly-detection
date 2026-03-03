@@ -126,6 +126,7 @@ class ArgumentParsing:
     def __init__(self, parser: ArgumentParser) -> None:
         self.parser = parser
         self.common_args()
+        self.train_despeckler_group = self.parser.add_argument_group()
         self.train_reconstructor_group = self.parser.add_argument_group()
         self.predict_reconstructor_group = self.parser.add_argument_group()
         self.compute_tsne_group = self.parser.add_argument_group()
@@ -137,9 +138,14 @@ class ArgumentParsing:
         self.parser.add_argument('--train_valid_ratio', type=List, default=[0.8, 0.2])
         self.parser.add_argument('--data_band', type=str, default=None)
         self.parser.add_argument('--rx_type', type=str, default='scm', choices=['scm', 'tyler'])
+        self.parser.add_argument('--rx_data', type=str, choices=['slc', 'synthetic', 'clutter'])
+        self.parser.add_argument('--rx_chunk_batch_size', type=int, default=65536)
         self.parser.add_argument('--rx_real_valued', action='store_true')
         self.parser.add_argument('--rx_box_car_size', type=int, default=39)
+        self.parser.add_argument('--in_channels', type=int, default=4)
+        self.parser.add_argument('--channels_type', type=str, default='slc', choices=['slc', 'pauli'])
         self.parser.add_argument('--rx_exclusion_window_size', type=int, default=31)
+        self.parser.add_argument('--undersample_dso', action='store_true')
         self.parser.add_argument('--normalization_values', default=[[2.18594766, 1.68413746, 1.74545192, 2.11463547], [4.92781165, 4.33335114, 4.37936831, 4.89514112]], type=ast.literal_eval, help='Min and max values for min-max normalization. Both should be store in lists, e.g., --normalization_values [[min1, min2, ...], [max1, max2, ...]]')
 
     def train_reconstructor_args(self, group: ArgumentParser) -> None:
@@ -147,7 +153,7 @@ class ArgumentParsing:
         group.add_argument('--recon_train_slc', action='store_true')
         group.add_argument('--recon_patch_size', type=int, default=32)
         group.add_argument('--recon_stride', type=int, default=16)
-        group.add_argument('--recon_in_channels', type=int, default=4)
+        group.add_argument('--recon_keep_phase', action='store_false')
         group.add_argument('--recon_train_batch_size', type=int, default=128)
         group.add_argument('--recon_val_batch_size', type=int, default=512)
         group.add_argument('--recon_epochs', type=int, default=100)
@@ -174,7 +180,6 @@ class ArgumentParsing:
         group.add_argument('--recon_latent_compression', type=int, default=1)
         
         group.add_argument('--recon_data_prediction', type=str, required=True, choices=['full', 'sample_only', 'valid_only', 'synthetic_only'])
-        group.add_argument('--recon_in_channels', type=int, default=4)
         group.add_argument('--recon_anomaly_kernel', type=int, default=11)
         group.add_argument('--recon_patch_size', type=int, default=32)
         group.add_argument('--recon_stride', type=int, default=16)
@@ -185,7 +190,6 @@ class ArgumentParsing:
         group.add_argument('--tsne_batch_size', type=int, default=512)
         group.add_argument('--tsne_dataset_min', type=float, default=0.)
         group.add_argument('--tsne_dataset_max', type=float, default=1.)
-        group.add_argument('--recon_in_channels', type=int, default=4)
         group.add_argument('--recon_patch_size', type=int, default=32)
 
 

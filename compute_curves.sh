@@ -32,9 +32,9 @@ SAVE_DIR="$RECONSTRUCTOR_WORKDIR/projects/reconstructor/roc_curves/${FOLDER_NAME
 
 mkdir -p $SAVE_DIR
 
-python compute_roc.py \
-    --path_label "$RECONSTRUCTOR_WORKDIR/data/AnomalyDetection/dessous/X_band/predict/slc/anomaly_mask_20210705_151308_01b_X45-Combined-strip_IA_rad_com1.npy" \
+python compute_curves.py \
+    --path_label "$RECONSTRUCTOR_WORKDIR/data/AnomalyDetection/DSO/L_band/predict/slc/test_1_undersampled_label.npy" \
     --save_dir $SAVE_DIR \
-    --anomaly_map_dirs "$RECONSTRUCTOR_WORKDIR/data/AnomalyDetection/dessous/X_band/train/slc/" "$RECONSTRUCTOR_WORKDIR/data/AnomalyDetection/dessous/X_band/predict/rec_cplxVAE${VERSION}_full_slc_9/" "$RECONSTRUCTOR_WORKDIR/data/AnomalyDetection/dessous/X_band/predict/rec_cplxVAE${VERSION}_full_slc_5/"
+    --anomaly_map_dirs "$RECONSTRUCTOR_WORKDIR/data/AnomalyDetection/DSO/L_band/train/slc/" "$RECONSTRUCTOR_WORKDIR/data/AnomalyDetection/DSO/L_band/predict/rec_cplxVAE${VERSION}_full_slc_9/" "$RECONSTRUCTOR_WORKDIR/data/AnomalyDetection/DSO/L_band/predict/rec_cplxVAE${VERSION}_full_slc_5/"
 
 echo "Done${VERSION}"

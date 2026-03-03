@@ -38,7 +38,7 @@ PREDICTION_DATA_TYPE=... # specify the prediction data type here
 WORKERS=4
 PRED_BATCH_SIZE=... # specify the prediction batch size here
 TEST_BATCH_SIZE=... # specify the test batch size here
-NORM_VALUES=... # specify the normalization values here
+NORM_VALUES=... # specify the normalization values here. This must be computed from the training data, for eg: if there is 6 images, this should be the smallest min values and biggest max values. For simplicity, when debugging the code, pose a break point in line 117 of base_dataset.py and get the values from there.
 
 python scripts/predict_reconstructor.py \
     --version $VERSION \

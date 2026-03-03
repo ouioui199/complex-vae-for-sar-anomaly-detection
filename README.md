@@ -17,7 +17,7 @@ git clone https://github.com/ouioui199/complex-vae-for-sar-anomaly-detection.git
 ```
 
 ### Environment
-Create a virtual environment with miniconda or other tools.
+Create a virtual environment with miniconda or other tools. Recommended python version 3.14
 Details to install miniconda could be found [here](https://www.anaconda.com/docs/getting-started/miniconda/install).
 
 ### Install requirements
@@ -70,7 +70,7 @@ Anomaly map computed with the Reed-Xiaoli detector can be computed with the comm
 python compute_RX.py --version 0 --data_band your-choice --datadir /your/data/folder/ --rx_box_car_size your-choice --rx_exclusion_window_size your-choice --rx_type your-choice
 ```
 
-To evaluate with cross-shaped synthetic anomalies, run the file ```create_synthetic_anomalies.py```. Change line 141 and 142 to your data path, and change any class default arguments if needed from line 152 to 154.
+To evaluate with cross-shaped synthetic anomalies or labeled anomalies, run the file ```create_synthetic_anomalies.py```. Change line 141 and 142 to your data path, and change any class default arguments if needed from line 152 to 154.
 ```python
 python create_synthetic_anomalies.py
 ```

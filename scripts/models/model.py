@@ -104,7 +104,7 @@ class ReconstructorModule(BaseModel):
             pred_ = denorm(pred_)
             
             name, ext = self.get_name_ext(data.filepath, add_epoch=False)
-            np.save(Path(f'{self.image_save_dir}/pred_{name}{ext}'), pred_)
+            np.save(Path(f'{self.image_save_dir}/pred_{name}.npy'), pred_)
 
     def on_test_start(self) -> None:
         version_number = self.opt.version.split("AE")[1]
@@ -125,11 +125,13 @@ class ReconstructorModule(BaseModel):
         
         anomaly_score = torch.linalg.norm(pred_cov - input_cov, ord='fro', dim=(1, 2)) ** 2
         
-        image_ids = batch['image_id'] - 1
-        cols = batch['col']
-        rows = batch['row']
-        for (id, col, row, score) in zip(image_ids, cols, rows, anomaly_score):
-            self.anomaly_map[id][col, row] = score
+        image_ids = (batch['image_id'] - 1).long()
+        cols = batch['col'].long()
+        rows = batch['row'].long()
+
+        for image_id in torch.unique(image_ids):
+            mask = image_ids == image_id
+            self.anomaly_map[image_id][cols[mask], rows[mask]] = anomaly_score[mask]
 
     def on_test_end(self) -> None:
         dataset = self.trainer.datamodule.test_dataset
@@ -143,12 +145,14 @@ class ReconstructorModule(BaseModel):
             euclidean_anomaly_map, sum_euclidean_anomaly_map = self.create_euclidean_anomaly_map(pred, input)
             
             name, ext = self.get_name_ext(dataset.filepath_input[i], add_epoch=False) # Attention here, check if i is really the image
-            np.save(Path(f'{self.anomaly_map_dir}/frobenius_anomaly_{name}{ext}'), frobenius_anomaly_map)
-            np.save(Path(f'{self.anomaly_map_dir}/manhattan_anomaly_{name}{ext}'), manhattan_anomaly_map)
-            np.save(Path(f'{self.anomaly_map_dir}/sum_manhattan_anomaly_{name}{ext}'), sum_manhattan_anomaly_map)
-            np.save(Path(f'{self.anomaly_map_dir}/euclidean_anomaly_{name}{ext}'), euclidean_anomaly_map)
-            np.save(Path(f'{self.anomaly_map_dir}/sum_euclidean_anomaly_{name}{ext}'), sum_euclidean_anomaly_map)
-            np.save(Path(f'{self.anomaly_map_dir}/diff_anomaly_{name}{ext}'), pred - input)
+            if self.opt.undersample_dso:
+                name = name + '_undersampled'
+            np.save(Path(f'{self.anomaly_map_dir}/frobenius_anomaly_{name}.npy'), frobenius_anomaly_map)
+            np.save(Path(f'{self.anomaly_map_dir}/manhattan_anomaly_{name}.npy'), manhattan_anomaly_map)
+            np.save(Path(f'{self.anomaly_map_dir}/sum_manhattan_anomaly_{name}.npy'), sum_manhattan_anomaly_map)
+            np.save(Path(f'{self.anomaly_map_dir}/euclidean_anomaly_{name}.npy'), euclidean_anomaly_map)
+            np.save(Path(f'{self.anomaly_map_dir}/sum_euclidean_anomaly_{name}.npy'), sum_euclidean_anomaly_map)
+            np.save(Path(f'{self.anomaly_map_dir}/diff_anomaly_{name}.npy'), pred - input)
 
 
 class VAEModule(ReconstructorModule):
@@ -251,7 +255,7 @@ class ComplexVAEModule(VAEModule):
         super().__init__(opt, image_out_dir)
 
         self.model = complexVAE(
-            num_channels=self.opt.recon_in_channels,
+            num_channels=self.opt.in_channels,
             num_layers=4,
             channels_ratio=32,
             activation=c_nn.modReLU(),

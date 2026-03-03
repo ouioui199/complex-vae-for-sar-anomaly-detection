@@ -8,6 +8,7 @@ import numpy as np
 from torch import Tensor
 
 from datasets.base_dataset import ReconstructorFile, ReconstructorDataset, BaseDataset
+import datasets.utils as D_U
 
 
 class ReconstructorTrainFile(ReconstructorFile):
@@ -62,6 +63,9 @@ class ReconstructorValidFile(ReconstructorFile):
             stride = self.opt.recon_stride // 4
         elif self.opt.recon_data_prediction == 'synthetic_only':
             stride = 1
+        else:
+            stride = self.opt.recon_stride
+
         if h == self.opt.recon_patch_size:
             self.x_range = list(np.array([0]))
         else:
@@ -107,9 +111,19 @@ class ReconstructorTestFile:
     ) -> None:
         """Return the whole validation part of the image"""
         self.opt = opt
-        
-        self.input = np.load(filepath_input, mmap_mode='r')
+
         self.reconstructed = np.load(filepath_reconstructed, mmap_mode='r')
+        self.reconstructed = np.abs(self.reconstructed) if 'cplx' not in opt.recon_model else self.reconstructed
+        
+        if 'DSO' in filepath_input:
+            self.input, _, _ = D_U.process_dot_mat(opt, filepath_input.replace('.npy', '.mat'), np)
+            norm_factor = np.median(self.input, axis=(1, 2), keepdims=True)
+            self.input = self.input / norm_factor
+
+            self.reconstructed = self.reconstructed / norm_factor
+        else:
+            self.input = np.load(filepath_input, mmap_mode='r')
+        self.input = D_U.process_image_representation(self.input, np, opt)
 
         _, self.height, self.width = self.input.shape
         self.half_kernel = opt.recon_anomaly_kernel // 2
@@ -253,14 +267,18 @@ class ReconstructorTestDataset(BaseDataset):
         super().__init__(opt, phase)
         
         version_number = opt.version.split('AE')[1]
-        filepath_slc_all = set(glob.glob(os.path.join(self.data_dir, 'slc', '*.npy')))
+        filepath_slc_all = set(glob.glob(os.path.join(self.data_dir, 'slc', '*')))
         self.filepath_reconstructed = glob.glob(os.path.join(self.data_dir, f'reconstructed{version_number}', '*.npy'))
         # Find matching SLC files for each reconstructed file
         self.filepath_input = [
-                fp.replace(f'reconstructed{version_number}/pred_', f'{self.data_folder}/') 
-                for fp in self.filepath_reconstructed 
-                if fp.replace(f'reconstructed{version_number}/pred_', 'slc/') in filepath_slc_all
-            ]
+            fp.replace(f'reconstructed{version_number}/pred_', f'{self.data_folder}/')
+            for fp in self.filepath_reconstructed
+            if (
+                fp.replace(f'reconstructed{version_number}/pred_', 'slc/').replace('.npy', '.mat')
+                if 'DSO' in self.data_dir
+                else fp.replace(f'reconstructed{version_number}/pred_', 'slc/')
+            ) in filepath_slc_all
+        ]
         
         self.images = [
             ReconstructorTestFile(opt, filepath_slc, filepath_reconstructed) for (filepath_slc, filepath_reconstructed) in zip(self.filepath_input, self.filepath_reconstructed)

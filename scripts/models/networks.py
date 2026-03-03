@@ -140,7 +140,7 @@ class AutoEncoder(nn.Module):
         current_channels = channels_ratio
         self.encoder_layers = []
         self.encoder_layers.append(
-            DoubleConv(self.n_channels, current_channels, activation, in_kernel=9, in_padding=4)
+            DoubleConv(self.n_channels, current_channels, activation, in_kernel=5, in_padding=2)
         )
         for i in range(1, num_layers):
             out_channels = channels_ratio * 2**i
