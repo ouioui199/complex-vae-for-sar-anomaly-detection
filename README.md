@@ -66,11 +66,11 @@ etc.
 
 ## Data preparation
 Anomaly map computed with the Reed-Xiaoli detector can be computed with the command below. Note that this code works with 4 polarization SAR images.
-```python
-python compute_RX.py --version 0 --data_band your-choice --datadir /your/data/folder/ --rx_box_car_size your-choice --rx_exclusion_window_size your-choice --rx_type your-choice
+```
+bash compute_RX.sh
 ```
 
-To evaluate with cross-shaped synthetic anomalies or labeled anomalies, run the file ```create_synthetic_anomalies.py```. Change line 141 and 142 to your data path, and change any class default arguments if needed from line 152 to 154.
+To evaluate with cross-shaped synthetic anomalies, run the file ```create_synthetic_anomalies.py```. Change line 141 and 142 to your data path, and change any class default arguments if needed from line 152 to 154.
 ```python
 python create_synthetic_anomalies.py
 ```
@@ -92,6 +92,19 @@ bash predict_reconstructor.sh > pred_recon_log.txt 2>&1
 ```
 
 The code will perform forward passes during prediction and output a reconstructed image. Then during the test process, it will compute the anomaly maps with the Frobenius change detector. By default, the code will test only with Frobenius boxcar of size 9x9 and 5x5. If you wish to test other boxcar size, feel free the change the ```ANOMALY_KERNEL=9``` argument in the shell script. To perform tests, we only need to predict once, so remember to add ```--recon_predict``` argument when calling code for the first time.
+
+## Evaluation
+To evaluate performances, run
+```
+bash compute_curves.sh
+```
+
+This will output curves of:
+- PD-PFA
+- PD-Log10(PFA)
+- PFA-Threshold
+- Log10(PFA)-Threshold
+- (For synthetic anomalies) PD-SNR
 
 ## Folder structure
 Once start running the code, the folder will be organized as below. After cloning the code, create environments, install dependencies, you can start immediately the training. No further actions are required. All folders will be created automatically.
